@@ -82,8 +82,17 @@ A full list of changes/fixes can be found in [change-log](https://github.com/dat
 - The entire code base is [instrumented with tracing](https://docs.rs/tracing/).
   This can be used for [standard logging](https://docs.rs/tracing/latest/tracing/index.html#log-compatibility), or for [distributed tracing](https://docs.rs/tracing/latest/tracing/index.html#related-crates), and the verbosity can be [statically configured at compile time](https://docs.rs/tracing/latest/tracing/level_filters/index.html) to completely remove all instrumentation below the configured level.
 
+## Commit Notifications
 
+OpenRaft provides a mechanism to receive notifications when log entries are durably committed to a majority of the cluster. This is achieved through the `OnEntryCommitted` trait.
 
+By implementing this trait and registering a handler with the `Raft` instance (via the `add_on_entry_committed_handler` method), applications can react to entries as soon as they are considered committed by the Raft consensus protocol. These notifications occur on the leader node, typically *before* the entry is applied to the application's state machine.
+
+This feature allows for use cases such as:
+- Triggering external actions or workflows that depend on the durability of a request.
+- Implementing systems that distinguish between the commit phase and the apply phase of an entry.
+
+For more details on implementing and using this feature, please refer to the API documentation for the `OnEntryCommitted` trait and the `Raft::add_on_entry_committed_handler` method in the `openraft` crate.
 
 # Contributing
 

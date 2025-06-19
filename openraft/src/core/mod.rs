@@ -53,6 +53,7 @@ use crate::raft::ClientWriteResponse;
 use crate::raft::Entry;
 use crate::raft::EntryPayload;
 use crate::raft::Membership;
+use crate::raft::OnEntryCommitted;
 use crate::raft::RaftMsg;
 use crate::raft::RaftRespTx;
 use crate::replication::ReplicaEvent;
@@ -164,6 +165,9 @@ pub struct RaftCore<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftSt
     tx_metrics: watch::Sender<RaftMetrics>,
 
     rx_shutdown: oneshot::Receiver<()>,
+
+    /// Handlers for when an entry is committed.
+    on_entry_committed_handlers: Arc<Mutex<Vec<Arc<dyn OnEntryCommitted<D>>>>>,
 }
 
 impl<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStorage<D, R>> RaftCore<D, R, N, S> {
@@ -175,6 +179,7 @@ impl<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStorage<D, R>> Ra
         rx_api: mpsc::UnboundedReceiver<(RaftMsg<D, R>, Span)>,
         tx_metrics: watch::Sender<RaftMetrics>,
         rx_shutdown: oneshot::Receiver<()>,
+        on_entry_committed_handlers: Arc<Mutex<Vec<Arc<dyn OnEntryCommitted<D>>>>>,
     ) -> JoinHandle<RaftResult<()>> {
         let membership = Membership::new_initial(id); // This is updated from storage in the main loop.
         let (tx_compaction, rx_compaction) = mpsc::channel(1);
@@ -204,6 +209,7 @@ impl<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStorage<D, R>> Ra
             rx_api,
             tx_metrics,
             rx_shutdown,
+            on_entry_committed_handlers,
         };
         tokio::spawn(this.main().instrument(trace_span!("spawn").or_current()))
     }

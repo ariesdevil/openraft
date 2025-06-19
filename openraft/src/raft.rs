@@ -41,6 +41,7 @@ struct RaftInner<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStora
     rx_metrics: watch::Receiver<RaftMetrics>,
     raft_handle: Mutex<Option<JoinHandle<RaftResult<()>>>>,
     tx_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    on_entry_committed_handlers: Arc<Mutex<Vec<Arc<dyn OnEntryCommitted<D>>>>>,
     marker_n: std::marker::PhantomData<N>,
     marker_s: std::marker::PhantomData<S>,
 }
@@ -94,16 +95,50 @@ impl<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStorage<D, R>> Ra
         let (tx_api, rx_api) = mpsc::unbounded_channel();
         let (tx_metrics, rx_metrics) = watch::channel(RaftMetrics::new_initial(id));
         let (tx_shutdown, rx_shutdown) = oneshot::channel();
-        let raft_handle = RaftCore::spawn(id, config, network, storage, rx_api, tx_metrics, rx_shutdown);
+        let on_entry_committed_handlers = Arc::new(Mutex::new(Vec::new()));
+        let raft_handle = RaftCore::spawn(
+            id,
+            config,
+            network,
+            storage,
+            rx_api,
+            tx_metrics,
+            rx_shutdown,
+            on_entry_committed_handlers.clone(),
+        );
         let inner = RaftInner {
             tx_api,
             rx_metrics,
             raft_handle: Mutex::new(Some(raft_handle)),
             tx_shutdown: Mutex::new(Some(tx_shutdown)),
+            on_entry_committed_handlers,
             marker_n: std::marker::PhantomData,
             marker_s: std::marker::PhantomData,
         };
         Self { inner: Arc::new(inner) }
+    }
+
+    /// Adds a handler for the `on_entry_committed` event.
+    ///
+    /// Handlers are called when a log entry is committed to the Raft log by a majority
+    /// of the cluster. This notification occurs on the leader, typically before the
+    /// entry is applied to the state machine.
+    ///
+    /// Multiple handlers can be added. Each handler will be invoked for every committed entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `handler`: An `Arc` wrapped instance of a type that implements `OnEntryCommitted<D>`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Assuming MyCommitHandler implements OnEntryCommitted<MyAppData>
+    /// let my_handler = Arc::new(MyCommitHandler::new());
+    /// raft_node.add_on_entry_committed_handler(my_handler);
+    /// ```
+    pub fn add_on_entry_committed_handler(&self, handler: Arc<dyn OnEntryCommitted<D>>) {
+        self.inner.on_entry_committed_handlers.lock().unwrap().push(handler);
     }
 
     /// Submit an AppendEntries RPC to this Raft node.
@@ -391,6 +426,37 @@ impl<D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStorage<D, R>> Cl
             inner: self.inner.clone(),
         }
     }
+}
+
+/// A trait for handling notifications when a log entry is committed.
+///
+/// This callback is invoked on the Raft leader node soon after a log entry has been
+/// successfully replicated to a majority of the cluster (i.e., committed), but
+/// typically *before* the entry is applied to the state machine.
+///
+/// This provides a mechanism for applications to react to events as soon as they are
+/// durably stored by the Raft cluster, without waiting for the potentially longer
+/// process of state machine application. This can be useful for use cases such as:
+/// - Triggering external events or workflows that depend on commit durability.
+/// - Early acknowledgement to clients that their request is committed, if the client
+///   is designed to handle separate commit and apply phases.
+///
+/// # Guarantees:
+/// - `on_entry_committed` is called for every log entry that the leader determines to be committed.
+/// - It is called on the leader node.
+/// - It is called with the actual `Entry<D>` that was committed.
+/// - Notifications for a given Raft node are serialized, but the order with respect to
+///   state machine application depends on the Raft engine's internal processing. Tests
+///   verify that it's typically before application.
+///
+/// # Note:
+/// The frequency and exact timing can depend on the Raft protocol's flow. Handlers
+/// should be relatively lightweight to avoid blocking the Raft core task.
+pub trait OnEntryCommitted<D: AppData>: Send + Sync + 'static {
+    /// Called when a log entry is committed.
+    ///
+    /// `entry`: A reference to the committed log entry.
+    fn on_entry_committed(&self, entry: &Entry<D>);
 }
 
 pub(crate) type RaftRespTx<T, E> = oneshot::Sender<Result<T, E>>;

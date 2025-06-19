@@ -127,7 +127,49 @@ impl<'a, D: AppData, R: AppDataResponse, N: RaftNetwork<D>, S: RaftStorage<D, R>
         // If a new commit index has been established, then update a few needed elements.
 
         if commit_index > self.core.committed {
+            let previous_committed_log_id = self.core.committed; // Store old value
             self.core.committed = commit_index;
+
+            // Trigger on_entry_committed callbacks
+            if self.core.committed.index > previous_committed_log_id.index {
+                let start_index = previous_committed_log_id.index + 1;
+                let end_index = self.core.committed.index;
+                // Ensure we only attempt to fetch if the range is valid.
+                if start_index <= end_index {
+                    tracing::debug!(
+                        "Leader: calling on_entry_committed for entries from log index {} to {}",
+                        start_index,
+                        end_index
+                    );
+
+                    match self.core.storage.get_log_entries(start_index..=end_index).await {
+                        Ok(committed_entries) => {
+                            if !committed_entries.is_empty() {
+                                let handlers = self.core.on_entry_committed_handlers.lock().unwrap();
+                                if !handlers.is_empty() {
+                                    for entry in committed_entries.iter() {
+                                        for handler in handlers.iter() {
+                                            handler.on_entry_committed(entry);
+                                        }
+                                    }
+                                } else {
+                                    tracing::debug!("Leader: no on_entry_committed_handlers registered.");
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                "Leader: Failed to get log entries for on_entry_committed callback: {}. LastLogId: {}, PrevCommitted: {}, NewCommitted: {}",
+                                err,
+                                self.core.last_log_id,
+                                previous_committed_log_id,
+                                self.core.committed
+                            );
+                            // Proceed without callbacks if storage fails. The commit itself is successful.
+                        }
+                    }
+                }
+            }
 
             // Update all replication streams based on new commit index.
             for node in self.nodes.values() {
